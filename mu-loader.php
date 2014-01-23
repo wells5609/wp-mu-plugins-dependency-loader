@@ -2,13 +2,23 @@
 /**
 * Plugin Name: Must-Use Loader
 * Description: Load Must-Use Plugins in subdirectories using dependencies.
-* Version:     0.0.4
+* Version:     0.0.5
 * Author:      wells
 */
 
 if ( !defined('ABSPATH') ) exit;
 
 add_action( 'muplugins_loaded',	array( Mu_Plugins_Loader::instance(), 'init' ), 0 );
+
+function is_plugin_dependency_provided( $dependency ){
+	$mu = Mu_Plugins_Loader::instance();
+	return $mu->_loader->is_provided( $dependency );
+}
+
+function get_plugin_dependency_provider( $dependency ){
+	$mu = Mu_Plugins_Loader::instance();
+	return $mu->_loader->get_provider( $dependency );
+}
 
 /**
 * Class Mu_Plugins_Loader
@@ -33,7 +43,15 @@ class Mu_Plugins_Loader {
 	*/
 	public function init() {
 		
-		$this->_plugins = new Plugin_Dependency_Loader( $this->getPlugins() );
+		$this->_loader = new DependencyLoader( WPMU_PLUGIN_DIR );
+		
+		$plugins = $this->getPlugins();
+		
+		ksort( $plugins );
+		
+		foreach( $plugins as $i => $file ){
+			require $file;	
+		}
 		
 		// Delete transient cache, if active on the must use plugin list in network view
 		add_action( 'load-plugins.php', array($this, 'delete_cache') );
@@ -47,38 +65,50 @@ class Mu_Plugins_Loader {
 	*/
 	protected function getPlugins() {
 		
-		// Deactivate caching ?
-		if ( defined('MU_PLUGINS_NOCACHE') && MU_PLUGINS_NOCACHE ){
+		// Deactivate caching? Really only useful for debugging...
+		if ( defined('NOCACHE_MU_PLUGINS') && NOCACHE_MU_PLUGINS ){
 			$plugins = false;
 		} else {
 			$plugins = get_site_transient( 'subdir_wpmu_plugins' );
 		}
 		
-		if ( false === $plugins ){
+		if ( false !== $plugins ){
 			
-			$plugins = array();
-			$files = get_plugin_files_in_subdirectories( WPMU_PLUGIN_DIR );
-			
-			foreach( $files as $file ){
-				$plugins[ $file ] = get_plugin_with_dependencies_data( $file );
-			}
-			
-			set_site_transient( 'subdir_wpmu_plugins', $plugins );
-			
-		} else {
-		
-			foreach( $plugins as $file => $data ){
+			foreach( $plugins as $i => $file ){
 				// Validate plugins still exist
 				if ( ! is_readable( $file ) ){
 					$plugins = false;
 					break;
 				}
-			}
+			}	
+		}
+		
+		// Invalid cache? Get ordered plugin files from DependencyLoader
+		if ( false === $plugins ){
+			
+			$this->_loader->init();
+			
+			$plugins = $this->_loader->get_plugins();
+			
+			set_site_transient( 'subdir_wpmu_plugins', $plugins );
 		}
 		
 		return $plugins;
 	}
-
+	
+	function get_plugins_data( $plugin_id = null ){
+		
+		if ( !empty($plugin_id) ){
+		
+			if ( !isset($this->_loader->plugins_data[ $plugin_id ]) )
+				return null;
+		
+			return $this->_loader->plugins_data[ $plugin_id ];	
+		}
+		
+		return $this->_loader->plugins_data;	
+	}
+	
 	/**
 	* Delete the transient cache if on the MU Plugins page in wp-admin.
 	*/
@@ -93,16 +123,22 @@ class Mu_Plugins_Loader {
 	*/
 	function view_plugins() {
 		
-		foreach($this->getPlugins() as $file => $data){
+		$this->_loader->scan_plugins();
+		
+		$plugins = $this->getPlugins();
+		
+		ksort( $plugins );
+		
+		foreach($plugins as $i => $file){
 			
-			$order = array_search( $data['id'], $this->_plugins->load_order );
+			$data = $this->_loader->get_plugin_data_from_file( $file );
 			
-			$ordered[ $order ] = $data;
+			$ordered[ $i ] = $data;
 		}
 		
-		ksort( $ordered );
-		
 		foreach( $ordered as $order => $data ){
+			
+			$data = (array) $data;
 			
 			$name        = empty( $data['Name'] ) ? '?' : $data['Name'];
 			$desc        = empty( $data['Description'] ) ? '&nbsp;' : $data['Description'];
@@ -113,15 +149,26 @@ class Mu_Plugins_Loader {
 			$plugin_site = empty( $data['PluginURI'] ) ? '' : '| <a href="' . $data['PluginURI'] . '">' . __( 'Visit plugin site' ) . '</a>';
 			$id          = sanitize_title( $file );
 			
-			$deps		 = empty( $data['Depends'] ) ? '' : ' | <span><b>Depends on: </b>' . implode(', ', $data['Depends']) . '</span>';
-			$provides	 = empty( $data['Provides'] ) ? '' : ' | <span><b>Provides: </b>' . implode(', ', $data['Provides']) . '</span>';
-
+			$provides	 = empty( $data['Provides'] ) ? '' : ' | <em><b>Provides: </b></em>' . implode(', ', $data['Provides']);
+			
+			$dep_strs = array();
+			
+			if ( !empty($data['Depends']) ){				
+				foreach( $data['Depends'] as $dep ){
+					$provided = is_plugin_dependency_provided( $dep );
+					$dep_strs[] = $provided ? '<span style="color:green" title="Provided by: ' . get_plugin_dependency_provider( $dep ) . '">' . $dep . '</span>' : '<span style="color:red">' . $dep . '</span>';
+				}
+			}
+			
+			$deps = empty($dep_strs) ? '' : ' | <b><em>Dependencies: </em></b>' . implode(', ', $dep_strs);
+			
+			
 			?>
 			<tr id="<?php echo $id; ?>" class="active">
 				<th scope="row" class="check-column"></th>
 				<td class="plugin-title">
 					<strong title="<?php echo $id; ?>"><?php echo $name; ?></strong>
-					<em>Load order: <?php echo $order; ?></em>
+					<em style="color:#888">Load order: <?php echo $order; ?></em>
 				</td>
 				<td class="column-description desc">
 					<div class="plugin-description"><p><?php echo $desc; ?></p></div>
@@ -138,7 +185,7 @@ class Mu_Plugins_Loader {
 
 }
 
-class Plugin_Dependency_Loader {
+class DependencyLoader {
 	
 	public $plugins = array();
 	
@@ -146,141 +193,114 @@ class Plugin_Dependency_Loader {
 	
 	public $providers = array();
 	
+	public $waiting = array();
+	
+	public $unsatisfiable = array();
+	
 	public $provided = array();
 	
-	public $loaded = array();
+	static public $queue = array();
 	
-	public $load_as_available = true;
+	static protected $scanned = false;
 	
-	public $load_order = array();
-	
-	
-	function __construct( array $plugins ){
+	protected $path;
 		
-		$this->scanPlugins( $plugins );
+	function __construct( $dirpath ){
 		
-		$this->loadAll();
+		$this->path = $dirpath;
+		
+	#	$this->scan_plugins();
 	}
 	
-	protected function scanPlugins( array $plugins ){
+	/**
+	* Scan files, start queue, and loop through $waiting array until empty.
+	* 
+	* When all of a plugin's dependencies are satisfied, the plugin is
+	* added to the queue and removed from the $waiting array.
+	*/
+	public function init(){
 		
-		static $c = 1;
+		$this->scan_plugins();	
+				
+		$this->startQueue();
 		
-		foreach( $plugins as $file => $data ){
-			
-			$id = $data['id'];
-			
-			$this->plugins[ $id ] = $file;
-			$this->plugin_data[ $id ] = $data;
-			
-			// Providers can also have dependencies, so we 
-			// load the dependencies provided first.
-			
-			// providers
-			if ( null !== $data['Provides'] ){
-				foreach( $data['Provides'] as $p ){
-					$this->add_provider( $p, $id );	
-				}
-			}
-			
-			// dependencies
-			if ( null !== $data['Depends'] ){
-				foreach( $data['Depends'] as $d ){
-					if ( ! $this->is_provided( $d ) )
-						continue 2; // don't load
-				}
-			}
-			
-			if ( $this->load_as_available ){
-				
-				require_once $file;
-				
-				$this->load_order[ $c ] = $id;
-				
-				$this->set_loaded( $id );
-				
-				if ( null !== $data['Provides'] ){
-					foreach( $data['Provides'] as $dep ){
-						$this->set_provided( $dep, $id );
-					}
-				}
-			
-			} else {
-				$this->load_order[ $c ] = $id;
-			}
-				
-			$c++;
+		do { 
+			$this->resolveWaiting();
+		} while ( ! empty( $this->waiting ) );
 		
-		}
 	}
 	
-	protected function loadAll(){
+	/**
+	* Returns queued plugin file array.
+	*/
+	public function get_plugins(){
 		
-		$c = max( array_keys( $this->load_order ) ) + 1;
+		ksort( self::$queue );
 		
-		foreach( $this->plugins as $id => $file ){
+		$files = array();
+		
+		foreach( self::$queue as $i => $id ){
 			
-			$this->loadPlugin( $id, $c );
+			$files[ $i ] = $this->plugins[ $id ]; // return the filepath	
 		}
+		
+		return $files;
 	}
 	
-	protected function loadPlugin( $id, $c = 1 ){
-		
-		if ( in_array( $id, $this->loaded ) ){
-			#var_dump( $c, 'LOADED - Skipping', $id, $this->get_dependencies($id), $this->loaded, $this->provided );
-			return;
-		}
-		
-		$_load = true;
-				
-		foreach( $this->get_dependencies( $id ) as $dep ){
-			
-			if ( ! $this->is_provided( $dep ) ){
-				
-				$provider = $this->find_provider( $dep );
-				
-				if ( !$provider || !$this->is_loaded( $provider ) )
-					$_load = false;
-			}
-		}
-		
-		#$will_load = $_load ? 'Dependencies satisfied - Loading...' : 'Dependencies not satisfied - NOT loading.';
-		#var_dump( $c, $will_load, $id, $this->get_dependencies($id), $this->loaded, $this->provided );
-			
-		if ( $_load ){
-			
-			require_once $this->plugins[ $id ];
-			
-			$this->set_loaded( $id );
-			
-			$this->load_order[ $c ] = $id;
-			
-			$c++;
-		}
+	/**
+	* Returns a plugin's data given its file path
+	*/
+	public function get_plugin_data_from_file( $file ){
+		return $this->plugin_data[ $this->get_plugin_id_from_file( $file ) ];	
 	}
 	
+	/**
+	* Returns a plugin's id given its file path.
+	*/
+	public function get_plugin_id_from_file( $file ){
+		return array_search( $file, $this->plugins );	
+	}
+	
+	/**
+	* Returns indexed array of plugin dependencies, if any.
+	*/
 	public function get_dependencies( $id ){
-		return isset( $this->plugin_data[ $id ] ) ? $this->plugin_data[ $id ]['Depends'] : null;	
+		return isset( $this->plugin_data[ $id ] ) ? $this->plugin_data[ $id ]->Depends : null;	
+	}
+		
+	/**
+	* Returns indexed array of dependencies provided by the plugin, if any.
+	*/
+	public function get_provides( $id ){
+		return isset( $this->plugin_data[ $id ] ) ? $this->plugin_data[ $id ]->Provides : null;	
 	}
 	
-	public function set_loaded( $id ){
-		$this->loaded[] = $id;
-		return $this;
+	/**
+	* Returns true if plugin is in queue, otherwise returns false.
+	*/
+	public function is_queued( $id ){
+		return in_array( $id, self::$queue );	
 	}
 	
-	public function is_loaded( $id ){
-		return in_array( $id, $this->loaded );	
-	}
-	
-	public function set_provided( $dependency, $id ){
-		$this->provided[ $dependency ] = $id;
-		return $this;	
-	}
-	
+	/**
+	* Returns true if dependency has been provided (i.e. a provider is in the queue)
+	* Otherwise returns false.
+	*/
 	public function is_provided( $dependency ){
 		return isset( $this->provided[ $dependency ] );	
 	}
 	
+	/**
+	* Returns true if dependency has a known provider.
+	*/
+	public function has_provider( $dependency ){
+		return isset( $this->providers[ $dependency ] );	
+	}
+	
+	/**
+	* Adds a plugin as a dependency provider.
+	* Dependencies can have multiple providers.
+	*/
 	public function add_provider( $dependency, $id ){
 			
 		if ( ! isset( $this->providers[ $dependency ] ) )
@@ -291,25 +311,168 @@ class Plugin_Dependency_Loader {
 		return $this;
 	}
 	
-	public function find_provider( $dependency ){
+	/**
+	* Returns the id of a plugin that provides the given dependency.
+	* First tries to return a plugin already queued.
+	*/
+	public function get_provider( $dependency ){
 		
-		if ( ! isset( $this->providers[ $dependency ] ) )
+		if ( $this->is_provided( $dependency ) )
+			return $this->provided[ $dependency ];
+		
+		if ( ! $this->has_provider($dependency) )
 			return false;
 		
 		$providers = $this->providers[ $dependency ];
 		
 		if ( count($providers) > 1 ){
 			foreach( $providers as $id ){
-				//  try to return a loaded provider first
-				if ( $this->is_loaded( $id ) )
+				//  try to return a queued provider first
+				if ( in_array( $id, self::$queue ) )
 					return $id;	
 			}
 		}
 		
-		return array_shift( $providers ); // return the 1st
+		return reset( $providers ); // return the 1st
+	}
+	
+	// for debugging/viewing the load queue
+	public function dump_queue(){
+		print_r( self::$queue );	
 	}
 			
+	/**
+	* Scan the plugins to find dependency providers - this means later we
+	* will know whether plugins with those dependencies can be loaded.
+	*/
+	public function scan_plugins(){
+		
+		if ( self::$scanned ) return;
+				
+		$plugins = get_plugin_files_in_subdirectories( $this->path );
+		
+		foreach( $plugins as $file ){
+			
+			$data = (object) get_plugin_with_dependencies_data( $file );
+			
+			$this->plugins[ $data->id ] = $file;
+			$this->plugin_data[ $data->id ] = $data;
+			
+			// Add as provider of each dep 
+			if ( !empty( $data->Provides ) ){
+				foreach( $data->Provides as $dep ){
+					$this->add_provider( $dep, $data->id );	
+				}
+			}
+		}
+		
+		self::$scanned = true;
+	}
+	
+	protected function startQueue(){
+		
+		foreach( $this->plugin_data as $id => $data ){
+			
+			if ( !empty( $data->Depends ) ){
+				
+				// plugin has deps - loop through
+				foreach( $data->Depends as $dep ){
+					
+					// If dependency is not provided, see if a provider is available.
+					// If not, this plugin is "unsatisfiable" and we will not try to load it. 
+					// Otherwise, it is put into the "waiting" array to be loaded later.
+					if ( ! $this->is_provided( $dep ) ){
+						
+						if ( ! $this->has_provider( $dep ) ){
+							$this->unsatisfiable[] = $id;
+						} else {
+							$this->waiting[] = $id;	
+						}
+						
+						continue 2;
+					}
+				}
+			}
+			// If we've reached this point, all dependencies (if any) are provided.
+			$this->addToQueue( $id );
+		}
+	}
+	
+	/**
+	* Loop through waiting plugins and add to queue if dependencies satisfied.
+	*
+	* Each time, check if dependencies have been satisified yet (i.e. a provider
+	* has been added to the queue). If so, add plugin to queue and remove from 
+	* the $waiting array. Otherwise, keep looping through.
+	*/
+	protected function resolveWaiting(){
+		
+		foreach( $this->waiting as $id ){
+			
+			$deps = $this->get_dependencies( $id );
+			
+			if ( !empty( $deps ) ){
+				foreach( $deps as $dep ){
+					if ( ! $this->is_provided( $dep ) )
+						continue 2;
+				}
+			}
+		
+			$this->addToQueue( $id );
+			$this->resetWaiting();
+		}
+	}
+	
+	/**
+	* Remove the most recently queued id from the $waiting array.
+	*
+	* Since this is called while looping through $waiting, we cannot use
+	* unset() - or at least I couldn't get it to work.
+	*/
+	protected function resetWaiting(){
+		
+		$added = array_intersect( $this->waiting, self::$queue );
+		
+		$waiting = array_diff( $this->waiting, $added );
+		
+		$this->waiting = $waiting;
+	}
+		
+	/**
+	* Adds an id to the ordered loading queue.
+	*
+	* If plugin provides dependencies, we set those dependencies as provided.
+	*/
+	protected function addToQueue( $id ){
+		static $order;
+		if ( !isset($order) )
+			$order = 1;
+		
+		if ( in_array( $id, self::$queue ) ) return; // already queued
+		
+		self::$queue[ $order ] = $id;
+	
+		$order += 1; // increment order
+	
+		if ( $provides = $this->get_provides( $id ) ){
+			
+			foreach( $provides as $dep ){
+				$this->setProvided( $dep, $id );	
+			}	
+		}
+		
+	}
+	
+	/**
+	* Set a dependency as provided by a plugin (id).
+	*/
+	protected function setProvided( $dependency, $id ){
+		$this->provided[ $dependency ] = $id;
+		return $this;	
+	}
+	
 }
+
 
 /**
 * Returns array of files that match the subdirectory names in the given directory.
@@ -326,7 +489,7 @@ function get_plugin_files_in_subdirectories( $directory ){
 	
 	foreach( $items as $item ){
 		
-		if ( pathinfo( $item, PATHINFO_EXTENSION ) )
+		if ( ! is_dir( $item ) )
 			continue; // skip files
 	
 		$name = basename( $item ); // get plugin file name from dir name
@@ -362,7 +525,7 @@ function get_plugin_with_dependencies_data( $file ){
 	$data['Title']      = $data['Name'];
 	$data['AuthorName'] = $data['Author'];
 	
-	$data['Depends']	= empty($data['Depends']) ? NULL : array_map( 'trim', explode(',', $data['Depends']) );
+	$data['Depends']	= empty($data['Depends'])  ? NULL : array_map( 'trim', explode(',', $data['Depends']) );
 	$data['Provides']	= empty($data['Provides']) ? NULL : array_map( 'trim', explode(',', $data['Provides']) );
 	
 	$data['id']			= str_replace( array(' ','.', ',','/','-'), '_', strtolower($data['Name']) );
