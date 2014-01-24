@@ -2,7 +2,7 @@
 /**
 * Plugin Name: Must-Use Loader
 * Description: Load Must-Use Plugins in subdirectories using dependencies.
-* Version:     0.0.5
+* Version:     0.0.6
 * Author:      wells
 */
 
@@ -28,10 +28,8 @@ class Mu_Plugins_Loader {
 	static protected $_instance;
 	
 	/**
-	 * Handler for the action 'init'. Instantiates this class.
-	 * @since  0.0.1
-	 * @return Mu_Plugins_Loader
-	 */
+	* Instantiates this class.
+	*/
 	public static function instance(){
 		if ( !isset(self::$_instance) )
 			self::$_instance = new self();
@@ -39,7 +37,7 @@ class Mu_Plugins_Loader {
 	}
 
 	/**
-	* Init
+	* Initializer. Loads plug-ins.
 	*/
 	public function init() {
 		
@@ -65,8 +63,8 @@ class Mu_Plugins_Loader {
 	*/
 	protected function getPlugins() {
 		
-		// Deactivate caching? Really only useful for debugging...
 		if ( defined('NOCACHE_MU_PLUGINS') && NOCACHE_MU_PLUGINS ){
+			// Deactivate caching? Really only useful for debugging
 			$plugins = false;
 		} else {
 			$plugins = get_site_transient( 'subdir_wpmu_plugins' );
@@ -83,7 +81,7 @@ class Mu_Plugins_Loader {
 			}	
 		}
 		
-		// Invalid cache? Get ordered plugin files from DependencyLoader
+		// Invalid cache? Get ordered file array from DependencyLoader
 		if ( false === $plugins ){
 			
 			$this->_loader->init();
@@ -123,17 +121,23 @@ class Mu_Plugins_Loader {
 	*/
 	function view_plugins() {
 		
-		$this->_loader->scan_plugins();
-		
+		$ordered = array();
 		$plugins = $this->getPlugins();
-		
 		ksort( $plugins );
 		
 		foreach($plugins as $i => $file){
+			$ordered[ $i ] = $this->_loader->get_plugin_data_from_file( $file );
+		}
 			
-			$data = $this->_loader->get_plugin_data_from_file( $file );
+		if ( !empty($this->_loader->unsatisfiable) ){
 			
-			$ordered[ $i ] = $data;
+			$unsatisfied = array();
+			
+			foreach( $this->_loader->unsatisfiable as $id ){
+				$unsatisfied[] = $this->_loader->plugin_data[ $id ];	
+			}
+			
+			$ordered = array_merge( $ordered, $unsatisfied );	
 		}
 		
 		foreach( $ordered as $order => $data ){
@@ -162,13 +166,16 @@ class Mu_Plugins_Loader {
 			
 			$deps = empty($dep_strs) ? '' : ' | <b><em>Dependencies: </em></b>' . implode(', ', $dep_strs);
 			
+			$active = in_array( sanitize_title_with_dashes( $data['Name'] ), $this->_loader->unsatisfiable ) ? 'inactive' : 'active';
+			
+			$order = 'inactive' === $active ? 'Unsatisfied dependencies' : 'Load order: ' . $order;
 			
 			?>
-			<tr id="<?php echo $id; ?>" class="active">
+			<tr id="<?php echo $id; ?>" class="<?php echo $active; ?>">
 				<th scope="row" class="check-column"></th>
 				<td class="plugin-title">
 					<strong title="<?php echo $id; ?>"><?php echo $name; ?></strong>
-					<em style="color:#888">Load order: <?php echo $order; ?></em>
+					<em style="color:#888"><?php echo $order; ?></em>
 				</td>
 				<td class="column-description desc">
 					<div class="plugin-description"><p><?php echo $desc; ?></p></div>
@@ -208,8 +215,6 @@ class DependencyLoader {
 	function __construct( $dirpath ){
 		
 		$this->path = $dirpath;
-		
-	#	$this->scan_plugins();
 	}
 	
 	/**
@@ -346,8 +351,6 @@ class DependencyLoader {
 	* will know whether plugins with those dependencies can be loaded.
 	*/
 	public function scan_plugins(){
-		
-		if ( self::$scanned ) return;
 				
 		$plugins = get_plugin_files_in_subdirectories( $this->path );
 		
@@ -365,8 +368,6 @@ class DependencyLoader {
 				}
 			}
 		}
-		
-		self::$scanned = true;
 	}
 	
 	protected function startQueue(){
@@ -489,9 +490,9 @@ function get_plugin_files_in_subdirectories( $directory ){
 	
 	foreach( $items as $item ){
 		
-		if ( ! is_dir( $item ) )
+		if ( ! is_dir( $directory . '/' . $item ) )
 			continue; // skip files
-	
+		
 		$name = basename( $item ); // get plugin file name from dir name
 		
 		$file = $directory . '/' . $item . '/' . $name . '.php';
@@ -500,7 +501,7 @@ function get_plugin_files_in_subdirectories( $directory ){
 			$files[ $name ] = $file;	
 		}	
 	}
-	
+		
 	return $files;	
 }
 
@@ -528,7 +529,7 @@ function get_plugin_with_dependencies_data( $file ){
 	$data['Depends']	= empty($data['Depends'])  ? NULL : array_map( 'trim', explode(',', $data['Depends']) );
 	$data['Provides']	= empty($data['Provides']) ? NULL : array_map( 'trim', explode(',', $data['Provides']) );
 	
-	$data['id']			= str_replace( array(' ','.', ',','/','-'), '_', strtolower($data['Name']) );
+	$data['id']			= sanitize_title_with_dashes( $data['Name'] );
 	
 	return $data;
 }
